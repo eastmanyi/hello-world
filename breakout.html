@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Breakout</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111827; color: #fff; font: 16px system-ui, sans-serif; }
+    main { text-align: center; }
+    button { margin: 0 4px 10px; padding: 9px 14px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font: inherit; cursor: pointer; }
+    #sound-state { color: #fbbf24; min-height: 1.5em; }
+    canvas { display: block; width: min(600px, calc(100vw - 24px)); height: auto; border: 2px solid #64748b; background: #000; }
+    small { display: block; margin-top: 8px; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <main>
+    <button id="start" type="button">Start game and enable sound</button>
+    <div id="sound-state">Sound is off</div>
+    <canvas id="game" width="600" height="450"></canvas>
+    <small>Move the mouse to control the white paddle. Press R to restart.</small>
+  </main>
+  <script>
+    const canvas = document.querySelector('#game');
+    const ctx = canvas.getContext('2d');
+    const startButton = document.querySelector('#start');
+    const soundState = document.querySelector('#sound-state');
+    const W = canvas.width, H = canvas.height;
+    let audio = null;
+    let soundEnabled = false;
+    let game;
+
+    function makeGame(message = 'Click Start to play') {
+      const bricks = [];
+      const colors = ['#ef4444', '#f97316', '#facc15', '#22c55e', '#22d3ee', '#3b82f6'];
+      const gap = 5, cols = 10, rows = 6, brickW = (W - gap * (cols + 1)) / cols;
+      for (let row = 0; row < rows; row++) for (let col = 0; col < cols; col++) {
+        bricks.push({ x: gap + col * (brickW + gap), y: 35 + row * 29, w: brickW, h: 24, color: colors[row] });
+      }
+      game = {
+        active: false, score: 0, message, bricks,
+        paddle: { x: W / 2 - 75, targetX: W / 2 - 75, y: H - 48, w: 150, h: 14 },
+        ball: { x: W / 2, y: H / 2, r: 8, vx: Math.random() < .5 ? -4.5 : 4.5, vy: -4.5 },
+        nextShrink: performance.now() + 10000, flashUntil: 0,
+      };
+    }
+
+    async function enableSound() {
+      const Engine = window.AudioContext || window.webkitAudioContext;
+      if (!Engine) return false;
+      audio ??= new Engine();
+      if (audio.state !== 'running') await audio.resume();
+      soundEnabled = audio.state === 'running';
+      soundState.textContent = soundEnabled ? 'Sound enabled (test tone played)' : 'Sound could not be enabled';
+      return soundEnabled;
+    }
+
+    function tone(from, to, seconds, volume, wave = 'sine') {
+      if (!soundEnabled || !audio || audio.state !== 'running') return;
+      const osc = audio.createOscillator();
+      const gain = audio.createGain();
+      const now = audio.currentTime;
+      osc.type = wave;
+      osc.frequency.setValueAtTime(from, now);
+      osc.frequency.exponentialRampToValueAtTime(to, now + seconds);
+      gain.gain.setValueAtTime(volume, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + seconds);
+      osc.connect(gain).connect(audio.destination);
+      osc.start(now);
+      osc.stop(now + seconds);
+    }
+
+    function paddleSound() {
+      // A bright, loud two-layer sound that remains clear on laptop speakers.
+      tone(620, 330, 0.12, 0.78, 'square');
+      tone(260, 180, 0.16, 0.42, 'sine');
+    }
+    function brickSound() { tone(440, 180, 0.08, 0.20, 'square'); }
+    function victorySound() {
+      const melody = [523, 659, 784, 1047, 784, 1047, 1319, 1047];
+      melody.forEach((note, index) => {
+        const length = index === melody.length - 1 ? 0.42 : 0.14;
+        setTimeout(() => tone(note, note * 1.02, length, 0.32, 'triangle'), index * 145);
+      });
+    }
+
+    function movePaddle(event) {
+      if (document.pointerLockElement === canvas) {
+        const scale = W / canvas.getBoundingClientRect().width;
+        game.paddle.targetX = Math.max(0, Math.min(W - game.paddle.w, game.paddle.targetX + event.movementX * scale));
+        return;
+      }
+      const samples = event.getCoalescedEvents?.();
+      const latest = samples?.length ? samples[samples.length - 1] : event;
+      const rect = canvas.getBoundingClientRect();
+      const x = (latest.clientX - rect.left) * W / rect.width;
+      game.paddle.targetX = Math.max(0, Math.min(W - game.paddle.w, x - game.paddle.w / 2));
+    }
+
+    function hits(ball, box) {
+      return ball.x + ball.r >= box.x && ball.x - ball.r <= box.x + box.w &&
+             ball.y + ball.r >= box.y && ball.y - ball.r <= box.y + box.h;
+    }
+
+    function update(now) {
+      game.paddle.x = game.paddle.targetX; // input is applied once per frame: no event backlog or smoothing lag
+      if (!game.active) return;
+      if (now >= game.nextShrink && game.paddle.w > 60) {
+        const center = game.paddle.x + game.paddle.w / 2;
+        game.paddle.w = Math.max(60, game.paddle.w - 10);
+        game.paddle.x = game.paddle.targetX = Math.max(0, Math.min(W - game.paddle.w, center - game.paddle.w / 2));
+        game.nextShrink += 10000;
+      }
+      const b = game.ball, p = game.paddle;
+      const oldX = b.x, oldY = b.y;
+      b.x += b.vx; b.y += b.vy;
+      if (b.x - b.r <= 0) { b.x = b.r; b.vx = Math.abs(b.vx); }
+      if (b.x + b.r >= W) { b.x = W - b.r; b.vx = -Math.abs(b.vx); }
+      if (b.y - b.r <= 0) { b.y = b.r; b.vy = Math.abs(b.vy); }
+
+      const crossesPaddle = oldY + b.r <= p.y && b.y + b.r >= p.y;
+      const overPaddle = b.x + b.r >= p.x && b.x - b.r <= p.x + p.w;
+      if (b.vy > 0 && crossesPaddle && overPaddle) {
+        b.y = p.y - b.r;
+        b.vy = -Math.abs(b.vy);
+        b.vx = Math.max(-7, Math.min(7, b.vx + (b.x - (p.x + p.w / 2)) / 20));
+        game.flashUntil = now + 180;
+        paddleSound();
+      }
+      if (b.y - b.r > H) { makeGame('Missed! Click Start to restart'); return; }
+
+      const index = game.bricks.findIndex(brick => hits(b, brick));
+      if (index >= 0) {
+        const brick = game.bricks[index];
+        if (oldY + b.r <= brick.y || oldY - b.r >= brick.y + brick.h) b.vy = -b.vy;
+        else b.vx = -b.vx;
+        game.bricks.splice(index, 1);
+        game.score += 10;
+        brickSound();
+        if (!game.bricks.length) { game.active = false; game.message = 'You win!'; victorySound(); }
+      }
+    }
+
+    function draw(now) {
+      ctx.clearRect(0, 0, W, H);
+      for (const brick of game.bricks) { ctx.fillStyle = brick.color; ctx.fillRect(brick.x, brick.y, brick.w, brick.h); }
+      ctx.fillStyle = game.flashUntil > now ? '#86efac' : '#fff';
+      ctx.fillRect(game.paddle.x, game.paddle.y, game.paddle.w, game.paddle.h);
+      ctx.fillStyle = '#facc15'; ctx.beginPath(); ctx.arc(game.ball.x, game.ball.y, game.ball.r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = '16px system-ui'; ctx.fillText(`Score: ${game.score}   Paddle: ${game.paddle.w}px`, 10, H - 14);
+      if (!game.active) { ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center'; ctx.fillText(game.message, W / 2, H / 2); ctx.textAlign = 'start'; }
+    }
+
+    function frame(now) { update(now); draw(now); requestAnimationFrame(frame); }
+    startButton.addEventListener('click', async () => {
+      canvas.requestPointerLock?.();
+      const ready = await enableSound();
+      if (ready) paddleSound();
+      makeGame('');
+      game.active = true;
+    });
+    document.addEventListener('pointerlockchange', () => {
+      if (document.pointerLockElement === canvas) soundState.textContent = 'Sound enabled ??mouse locked (Esc to release)';
+    });
+    window.addEventListener('pointermove', movePaddle, { passive: true });
+    window.addEventListener('keydown', event => { if (event.key.toLowerCase() === 'r') makeGame(); });
+    makeGame();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
+
